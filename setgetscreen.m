@@ -18,18 +18,27 @@
 
 #include <ApplicationServices/ApplicationServices.h>
 
-bool MyDisplaySwitchToMode (CGDirectDisplayID display, CFDictionaryRef mode);
+struct screenMode {
+    size_t width;
+    size_t height;
+    size_t bitsPerPixel;
+};
+
+
+bool MyDisplaySwitchToMode (CGDirectDisplayID display, CGDisplayModeRef mode);
 void ListDisplays( CGDisplayCount dispCount, CGDirectDisplayID *dispArray );
 void usage(const char *argv[]);
 void GetDisplayParms(CGDirectDisplayID *dispArray,  CGDisplayCount dispNum, int *width, int *height, int *depth, int *freq);
+CGDisplayModeRef bestMatchForMode (struct screenMode screenMode);
 
 int main (int argc, const char * argv[])
 {
     int    h;                             // horizontal resolution
     int v;                             // vertical resolution
     int depth, freq;
+    struct screenMode resMode;
 
-    CFDictionaryRef switchMode;     // mode to switch to
+    CGDisplayModeRef switchMode;     // mode to switch to
     CGDirectDisplayID theDisplay;  // ID of  display, display to set
     int displayNum; //display number requested by user
     
@@ -56,7 +65,7 @@ int main (int argc, const char * argv[])
             usage(argv);
             return 0;
         }
-        else if (displayNum = atoi(argv[1])) {
+        else if ((displayNum = atoi(argv[1]))) {
             if (displayNum <= dspyCnt) {
                 GetDisplayParms(onlineDspys, displayNum-1, &h, &v, &depth, &freq);
                 printf("%d %d\n", h, v);
@@ -78,15 +87,18 @@ int main (int argc, const char * argv[])
     }
     else {
         if (argc != 3 || !(h = atoi(argv[1])) || !(v = atoi(argv[2])) ) {
-            fprintf(stderr, "ERROR: syntax error.\n", argv[0]);
+            fprintf(stderr, "ERROR: syntax error.\n");
             usage(argv);
             return -1;
         }
         theDisplay = CGMainDisplayID();
     }
 
+    resMode.height = v;
+    resMode.width = h;
+    resMode.bitsPerPixel = 32;
 
-    switchMode = CGDisplayBestModeForParameters(theDisplay, 32, h, v, NULL);
+    switchMode = bestMatchForMode(resMode);
     
     if (! MyDisplaySwitchToMode(theDisplay, switchMode)) {
         fprintf(stderr, "Error changing resolution to %d %d\n", h, v);
@@ -96,38 +108,50 @@ int main (int argc, const char * argv[])
     return 0;
 }
 
-
 void ListDisplays( CGDisplayCount dispCount, CGDirectDisplayID *dispArray )
 {
     int    h, v, depth, freq;
+    int i;
+    CGDirectDisplayID mainDisplay = CGMainDisplayID();
     
         printf("Displays found: %d\n", dispCount);
-        for    (int i = 0 ; i < dispCount ;  i++ ) {
+        for    (i = 0 ; i < dispCount ;  i++ ) {
 
             GetDisplayParms(dispArray, i, &h, &v, &depth, &freq);
-            printf("Display %d (id %d):  %d x %d x %d @ %dHz\n", i+1, dispArray[i], h, v, depth, freq);
+            printf("Display %d (id %d):  %d x %d x %d @ %dHz", i+1, dispArray[i], h, v, depth, freq);
+            if ( mainDisplay == dispArray[i] ) 
+                printf(" (main)\n");
+            else
+                printf("\n");
         }
-}
 
+    // List all available modes
+    printf("Available resolutions:\n");
+    CFArrayRef allModes = CGDisplayCopyAllDisplayModes(kCGDirectMainDisplay, NULL);
+    for(int i = 0; i < CFArrayGetCount(allModes); i++)    {
+        CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
+
+            printf ("%d: %d x %d\n",i,CGDisplayModeGetWidth(mode),CGDisplayModeGetHeight(mode));
+        
+    }
+}
 
 void GetDisplayParms(CGDirectDisplayID *dispArray,  CGDisplayCount dispNum, int *width, int *height, int *depth, int *freq)
 {
-    CFDictionaryRef currentMode = CGDisplayCurrentMode (dispArray[dispNum]);
-    CFNumberRef number = CFDictionaryGetValue (currentMode, kCGDisplayRefreshRate);
-    CFNumberGetValue (number, kCFNumberLongType, freq);
-    number = CFDictionaryGetValue (currentMode, kCGDisplayWidth);
-    CFNumberGetValue (number, kCFNumberLongType, width);
-    number = CFDictionaryGetValue (currentMode, kCGDisplayHeight);
-    CFNumberGetValue (number, kCFNumberLongType, height);
-    number = CFDictionaryGetValue (currentMode, kCGDisplayBitsPerPixel);
-    CFNumberGetValue (number, kCFNumberLongType, depth);
+    CGDisplayModeRef currentMode = CGDisplayCopyDisplayMode (dispArray[dispNum]);
+    *freq = CGDisplayModeGetRefreshRate(currentMode);
+    *width = CGDisplayModeGetWidth(currentMode);
+    *height = CGDisplayModeGetHeight(currentMode);
+    //CFNumberGetValue (number, kCFNumberLongType, depth);
+    *depth = 32;
+    
 }
 
-bool MyDisplaySwitchToMode (CGDirectDisplayID display, CFDictionaryRef mode)
+bool MyDisplaySwitchToMode (CGDirectDisplayID display, CGDisplayModeRef mode)
 {
     CGDisplayConfigRef config;
     if (CGBeginDisplayConfiguration(&config) == kCGErrorSuccess) {
-        CGConfigureDisplayMode(config, display, mode);
+        CGConfigureDisplayWithDisplayMode(config, display, mode, NULL);
         CGCompleteDisplayConfiguration(config, kCGConfigureForSession );
         return true;
     }
@@ -147,4 +171,65 @@ void usage(const char *argv[])
     printf("%s 2 800 600    set resolution of secondary display to 800x600\n", argv[0]);
     printf("%s 3            get resolution of third display\n", argv[0]);
     printf("%s -l           get resolution, bit depth and refresh rate of all displays\n\n", argv[0]);
+}
+
+size_t displayBitsPerPixelForMode (CGDisplayModeRef mode) {
+    
+    size_t depth = 0;
+    
+    CFStringRef pixEnc = CGDisplayModeCopyPixelEncoding(mode);
+    if(CFStringCompare(pixEnc, CFSTR(IO32BitDirectPixels), kCFCompareCaseInsensitive) == kCFCompareEqualTo)
+        depth = 32;
+    else if(CFStringCompare(pixEnc, CFSTR(IO16BitDirectPixels), kCFCompareCaseInsensitive) == kCFCompareEqualTo)
+        depth = 16;
+    else if(CFStringCompare(pixEnc, CFSTR(IO8BitIndexedPixels), kCFCompareCaseInsensitive) == kCFCompareEqualTo)
+        depth = 8;
+    
+    return depth;
+}
+
+CGDisplayModeRef bestMatchForMode (struct screenMode screenMode) {
+    
+    bool exactMatch = false;
+    
+    // Get a copy of the current display mode
+    CGDisplayModeRef displayMode = CGDisplayCopyDisplayMode(kCGDirectMainDisplay);
+    
+    // Loop through all display modes to determine the closest match.
+    // CGDisplayBestModeForParameters is deprecated on 10.6 so we will emulate it's behavior
+    // Try to find a mode with the requested depth and equal or greater dimensions first.
+    // If no match is found, try to find a mode with greater depth and same or greater dimensions.
+    // If still no match is found, just use the current mode.
+    CFArrayRef allModes = CGDisplayCopyAllDisplayModes(kCGDirectMainDisplay, NULL);
+    for(int i = 0; i < CFArrayGetCount(allModes); i++)    {
+        CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
+
+        if(displayBitsPerPixelForMode(mode) != screenMode.bitsPerPixel)
+            continue;
+        
+        if((CGDisplayModeGetWidth(mode) == screenMode.width) && (CGDisplayModeGetHeight(mode) == screenMode.height))
+        {
+            displayMode = mode;
+            exactMatch = true;
+            break;
+        }
+    }
+    
+    // No depth match was found
+    if(!exactMatch)
+    {
+        for(int i = 0; i < CFArrayGetCount(allModes); i++)
+        {
+            CGDisplayModeRef mode = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
+            if(displayBitsPerPixelForMode(mode) >= screenMode.bitsPerPixel)
+                continue;
+            
+            if((CGDisplayModeGetWidth(mode) >= screenMode.width) && (CGDisplayModeGetHeight(mode) >= screenMode.height))
+            {
+                displayMode = mode;
+                break;
+            }
+        }
+    }
+    return displayMode;
 }
